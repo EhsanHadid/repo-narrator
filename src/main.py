@@ -1,44 +1,157 @@
 import sys
 import os
-sys.path.insert(0, os.path.dirname(__file__))
-
 import json
 import re
 import subprocess
 from pathlib import Path
-from tree import build_tree, render_plain_tree, render_annotated_tree
+from abc import ABC, abstractmethod
 
-# ── Bootstrap provider ──────────────────────────────────────────────────────
+# ── Providers ────────────────────────────────────────────────────────────────
+
+class BaseProvider(ABC):
+    @abstractmethod
+    def complete(self, prompt: str, system: str = "") -> str:
+        pass
+
+class ClaudeProvider(BaseProvider):
+    def __init__(self):
+        import anthropic
+        self.client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+        self.model = os.environ.get("OVERRIDE_MODEL") or "claude-opus-4-5"
+
+    def complete(self, prompt: str, system: str = "") -> str:
+        msg = self.client.messages.create(
+            model=self.model,
+            max_tokens=8096,
+            system=system or "You are a senior software engineer writing clear, concise technical documentation.",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return msg.content[0].text
+
+class OpenAIProvider(BaseProvider):
+    def __init__(self):
+        from openai import OpenAI
+        self.client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+        self.model = os.environ.get("OVERRIDE_MODEL") or "gpt-4o"
+
+    def complete(self, prompt: str, system: str = "") -> str:
+        response = self.client.chat.completions.create(
+            model=self.model,
+            max_tokens=8096,
+            messages=[
+                {"role": "system", "content": system or "You are a senior software engineer writing clear, concise technical documentation."},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        return response.choices[0].message.content
+
+class GeminiProvider(BaseProvider):
+    def __init__(self):
+        import google.generativeai as genai
+        genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+        model_name = os.environ.get("OVERRIDE_MODEL") or "gemini-1.5-pro"
+        self.model = genai.GenerativeModel(model_name)
+
+    def complete(self, prompt: str, system: str = "") -> str:
+        full_prompt = f"{system}\n\n{prompt}" if system else prompt
+        response = self.model.generate_content(full_prompt)
+        return response.text
 
 def get_provider():
     provider = os.environ.get("AI_PROVIDER", "claude").lower()
     if provider == "claude":
-        from providers.claude import ClaudeProvider
         return ClaudeProvider()
     elif provider == "openai":
-        from providers.openai import OpenAIProvider
         return OpenAIProvider()
     elif provider == "gemini":
-        from providers.gemini import GeminiProvider
         return GeminiProvider()
     else:
         raise ValueError(f"Unknown AI provider: {provider}")
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# ── Tree ─────────────────────────────────────────────────────────────────────
+
+def build_tree(root: str, ignored: list) -> list:
+    entries = []
+    root_path = Path(root).resolve()
+
+    def should_ignore(p: Path) -> bool:
+        for part in p.parts:
+            if part in ignored:
+                return True
+        return False
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        current = Path(dirpath).resolve()
+        try:
+            rel = current.relative_to(root_path)
+        except ValueError:
+            continue
+
+        if should_ignore(rel):
+            dirnames.clear()
+            continue
+
+        dirnames[:] = sorted([
+            d for d in dirnames
+            if not should_ignore(rel / d)
+        ])
+
+        depth = len(rel.parts)
+        if depth > 0:
+            entries.append({
+                "path": str(current),
+                "rel_path": str(rel),
+                "type": "dir",
+                "depth": depth,
+                "name": current.name,
+            })
+
+        for fname in sorted(filenames):
+            frel = rel / fname
+            if should_ignore(frel):
+                continue
+            entries.append({
+                "path": str(current / fname),
+                "rel_path": str(frel),
+                "type": "file",
+                "depth": depth + 1,
+                "name": fname,
+            })
+
+    return entries
+
+def render_plain_tree(entries: list) -> str:
+    lines = []
+    for e in entries:
+        indent = "  " * (e["depth"] - 1)
+        prefix = "[dir] " if e["type"] == "dir" else "[file] "
+        lines.append(f"{indent}{prefix}{e['rel_path']}")
+    return "\n".join(lines)
+
+def render_annotated_tree(entries: list, annotations: dict) -> str:
+    lines = []
+    for e in entries:
+        indent = "  " * (e["depth"] - 1)
+        name = e["name"]
+        suffix = "/" if e["type"] == "dir" else ""
+        desc = annotations.get(e["rel_path"], "")
+        comment = f"  # {desc}" if desc else ""
+        lines.append(f"{indent}{name}{suffix}{comment}")
+    return "\n".join(lines)
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def git_diff() -> str:
     try:
         return subprocess.check_output(
             ["git", "diff", "HEAD~1", "HEAD"], text=True, stderr=subprocess.DEVNULL
         )[:10000]
-    except subprocess.CalledProcessError:
-        return ""
+    except Exception:
+        return "(no diff available)"
 
 def read_file(path: str) -> str:
     p = Path(path)
-    if p.exists():
-        return p.read_text(encoding="utf-8")
-    return ""
+    return p.read_text(encoding="utf-8") if p.exists() else ""
 
 def write_file(path: str, content: str):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -54,28 +167,22 @@ def extract_json(text: str) -> dict:
             pass
     return {}
 
-def extract_code_block(text: str, lang: str = "") -> str:
-    pattern = rf"```{lang}\n(.*?)```" if lang else r"```(?:\w*)\n(.*?)```"
-    m = re.search(pattern, text, re.DOTALL)
-    return m.group(1).strip() if m else text.strip()
+# ── AI Steps ──────────────────────────────────────────────────────────────────
 
-# ── Step 1: Annotate file tree ───────────────────────────────────────────────
+SYSTEM = "You are a senior software engineer writing clear, concise technical documentation."
 
-ANNOTATE_SYSTEM = """You are a senior software engineer.
-Your job: read a repository file tree and write a short, plain-English annotation for every entry.
-Keep each annotation under 12 words. Be specific, not generic.
-Folders get a purpose statement. Files get a one-liner of what they do."""
-
-def annotate_tree(ai, entries: list[dict], plain_tree: str, pr_context: str) -> dict[str, str]:
+def annotate_tree(ai, entries: list, plain_tree: str, pr_context: str) -> dict:
     paths = [e["rel_path"] for e in entries]
     prompt = f"""Here is the repository file tree:
 
 {plain_tree}
 
-Recent PR context (use this to improve accuracy):
+Recent PR context:
 {pr_context}
 
-Return ONLY a JSON object mapping every path to its annotation. Example:
+Return ONLY a valid JSON object mapping every path to a short annotation (under 12 words).
+Folders get a purpose statement. Files get a one-liner.
+Example:
 {{
   "src/auth": "Handles JWT verification and session management",
   "src/auth/jwt.ts": "Signs and verifies RS256 JWT tokens"
@@ -84,23 +191,14 @@ Return ONLY a JSON object mapping every path to its annotation. Example:
 Paths to annotate:
 {json.dumps(paths, indent=2)}"""
 
-    response = ai.complete(prompt, system=ANNOTATE_SYSTEM)
-    return extract_json(response)
+    print(f"🤖  Annotating {len(entries)} entries...")
+    response = ai.complete(prompt, system=SYSTEM)
+    result = extract_json(response)
+    print(f"✅  Got {len(result)} annotations")
+    return result
 
-# ── Step 2: Generate / update structure.md ───────────────────────────────────
-
-STRUCTURE_SYSTEM = """You are a technical documentation writer.
-Write clear, structured markdown documentation for a software project's repository structure.
-Be concise but informative. Use second-person for folder summaries ("This folder contains...").
-"""
-
-def generate_structure_md(
-    ai,
-    annotated_tree: str,
-    pr_context: str,
-    existing: str,
-) -> str:
-    prompt = f"""Generate a `structure.md` file for this repository.
+def generate_structure_md(ai, annotated_tree: str, pr_context: str, existing: str) -> str:
+    prompt = f"""Generate a structure.md file for this repository.
 
 Annotated file tree:
 {annotated_tree}
@@ -108,125 +206,104 @@ Annotated file tree:
 Recent changes:
 {pr_context}
 
-Existing structure.md (update it, don't start from scratch if it exists):
-{existing or "(none — create fresh)"}
+Existing structure.md (update it if exists, otherwise create fresh):
+{existing or "(none)"}
 
-The document must include:
-1. A short project overview paragraph (2-3 sentences)
-2. A "## File Tree" section with the annotated tree inside a code block
-3. A "## Module / Folder Guide" section with a short paragraph per top-level folder
-4. A "## Key Files" section listing the most important files with one-line descriptions
+Include:
+1. Short project overview (2-3 sentences)
+2. ## File Tree section with the annotated tree in a code block
+3. ## Folder Guide section with a short paragraph per top-level folder
+4. ## Key Files section listing important files with one-line descriptions
 
-Return ONLY the full markdown content, no extra commentary."""
+Return ONLY the markdown content."""
 
-    return ai.complete(prompt, system=STRUCTURE_SYSTEM)
+    return ai.complete(prompt, system=SYSTEM)
 
-# ── Step 3: Update README ────────────────────────────────────────────────────
-
-README_SYSTEM = """You are a technical documentation writer maintaining a project README.
-Only update sections that are directly affected by the PR changes.
-Preserve the existing structure, tone, and formatting exactly.
-Never remove sections. Never add fluff."""
-
-def update_readme(ai, existing_readme: str, annotated_tree: str, pr_context: str, embed_structure: bool) -> str:
-    embed_instruction = (
-        "Also update or insert a collapsible <details><summary>📁 Repository Structure</summary> section "
-        "near the bottom of the README containing the annotated file tree in a code block."
-        if embed_structure else
-        "Do NOT embed the file tree in the README."
+def update_readme(ai, existing: str, annotated_tree: str, pr_context: str, embed: bool) -> str:
+    embed_note = (
+        "Also add or update a collapsible <details><summary>Repository Structure</summary> section with the file tree."
+        if embed else "Do NOT embed the file tree in the README."
     )
-
-    prompt = f"""Update this README.md based on the merged PR below.
+    prompt = f"""Update this README.md based on the merged PR.
 
 Current README:
-{existing_readme or "(empty — create a minimal README)"}
+{existing or "(empty - create a minimal README)"}
 
 PR context:
 {pr_context}
 
-Annotated repo structure (for reference):
+Repo structure (for reference):
 {annotated_tree[:3000]}
 
 Instructions:
-- Update the features list, usage, or API sections only if the PR changes them.
-- Update badges or version numbers if relevant.
-- {embed_instruction}
+- Only update sections directly affected by the PR.
+- Preserve existing structure, tone, and formatting.
+- {embed_note}
 - Return ONLY the full updated README content."""
 
-    return ai.complete(prompt, system=README_SYSTEM)
-
-# ── Step 4: Update extra markdown files ──────────────────────────────────────
-
-EXTRA_MD_SYSTEM = """You are a technical documentation writer.
-Update the given markdown file to reflect the merged PR changes.
-Preserve all existing content and formatting. Be concise."""
+    return ai.complete(prompt, system=SYSTEM)
 
 def update_extra_md(ai, path: str, content: str, pr_context: str) -> str:
     prompt = f"""Update this markdown file based on the merged PR.
 
 File: {path}
 Current content:
-{content or "(empty — create appropriate content for this file type)"}
+{content or "(empty)"}
 
 PR context:
 {pr_context}
 
-For CHANGELOG.md: add a new entry under ## [Unreleased] with the PR details.
-For other files: only update what's directly relevant to the PR.
+For CHANGELOG.md: add a new entry under ## [Unreleased].
+For other files: only update what is directly relevant.
 
 Return ONLY the full updated file content."""
-    return ai.complete(prompt, system=EXTRA_MD_SYSTEM)
+    return ai.complete(prompt, system=SYSTEM)
 
-# ── Main ─────────────────────────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    print(f"🚀  Repo Narrator starting with provider: {os.environ.get('AI_PROVIDER', 'claude')}")
     ai = get_provider()
 
-    # Config
-    ignored = [p.strip() for p in os.environ.get("IGNORED_PATHS", "node_modules,.git,dist,build,.next").split(",")]
+    ignored_raw = os.environ.get("IGNORED_PATHS", "node_modules,.git,dist,build,.next,__pycache__,.nx,coverage")
+    ignored = [p.strip() for p in ignored_raw.split(",")]
+
     structure_file = os.environ.get("STRUCTURE_FILE", "structure.md")
     embed_structure = os.environ.get("EMBED_STRUCTURE_README", "false").lower() == "true"
-    do_update_readme = os.environ.get("UPDATE_README", "true").lower() == "true"
+    do_readme = os.environ.get("UPDATE_README", "true").lower() == "true"
     extra_files = [f.strip() for f in os.environ.get("EXTRA_MD_FILES", "CHANGELOG.md").split(",") if f.strip()]
 
-    # PR context
-    pr_context = f"""PR #{os.environ.get('PR_NUMBER')} by @{os.environ.get('PR_AUTHOR')}
-Title: {os.environ.get('PR_TITLE')}
+    pr_context = f"""PR #{os.environ.get('PR_NUMBER', 'N/A')} by @{os.environ.get('PR_AUTHOR', 'unknown')}
+Title: {os.environ.get('PR_TITLE', 'Manual run')}
 Description: {os.environ.get('PR_BODY', '')[:2000]}
 
 Git diff:
 {git_diff()}"""
 
-    # ── 1. Build and annotate the tree
     print("🌳  Building file tree...")
     entries = build_tree(".", ignored)
+    print(f"    Found {len(entries)} entries")
     plain_tree = render_plain_tree(entries)
 
-    print(f"🤖  Annotating {len(entries)} entries with {os.environ.get('AI_PROVIDER')}...")
     annotations = annotate_tree(ai, entries, plain_tree, pr_context)
-
     annotated_tree = render_annotated_tree(entries, annotations)
 
-    # ── 2. Generate structure.md
     if structure_file and structure_file.lower() != "none":
         print(f"📄  Generating {structure_file}...")
-        existing_structure = read_file(structure_file)
-        structure_md = generate_structure_md(ai, annotated_tree, pr_context, existing_structure)
-        write_file(structure_file, structure_md)
+        existing = read_file(structure_file)
+        content = generate_structure_md(ai, annotated_tree, pr_context, existing)
+        write_file(structure_file, content)
 
-    # ── 3. Update README
-    if do_update_readme:
+    if do_readme:
         print("📝  Updating README.md...")
-        existing_readme = read_file("README.md")
-        new_readme = update_readme(ai, existing_readme, annotated_tree, pr_context, embed_structure)
-        write_file("README.md", new_readme)
+        existing = read_file("README.md")
+        content = update_readme(ai, existing, annotated_tree, pr_context, embed_structure)
+        write_file("README.md", content)
 
-    # ── 4. Update extra markdown files
     for md_path in extra_files:
         print(f"📝  Updating {md_path}...")
-        content = read_file(md_path)
-        updated = update_extra_md(ai, md_path, content, pr_context)
-        write_file(md_path, updated)
+        content = update_extra_md(ai, md_path, read_file(md_path), pr_context)
+        write_file(md_path, content)
 
     print("✅  Repo Narrator done.")
 

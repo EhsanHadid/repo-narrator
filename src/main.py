@@ -49,7 +49,7 @@ class GeminiProvider(BaseProvider):
     def __init__(self):
         from google import genai
         self.client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-        self.model = os.environ.get("OVERRIDE_MODEL") or "gemini-2.5-pro"
+        self.model = os.environ.get("OVERRIDE_MODEL") or "gemini-2.0-flash"
 
     def complete(self, prompt: str, system: str = "") -> str:
         from google import genai
@@ -63,7 +63,7 @@ class GeminiProvider(BaseProvider):
             ),
         )
         return response.text
-        
+
 def get_provider():
     provider = os.environ.get("AI_PROVIDER", "claude").lower()
     if provider == "claude":

@@ -1,4 +1,4 @@
-name: "Repo Narrator"
+name: "Repo Narrator - AI Docs Updater"
 description: "AI-powered docs updater: annotates file structure, updates README and markdown files after every merged PR"
 author: "your-username"
 

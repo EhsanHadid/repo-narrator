@@ -47,16 +47,23 @@ class OpenAIProvider(BaseProvider):
 
 class GeminiProvider(BaseProvider):
     def __init__(self):
-        import google.generativeai as genai
-        genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-        model_name = os.environ.get("OVERRIDE_MODEL") or "gemini-1.5-pro"
-        self.model = genai.GenerativeModel(model_name)
+        from google import genai
+        self.client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+        self.model = os.environ.get("OVERRIDE_MODEL") or "gemini-2.5-pro"
 
     def complete(self, prompt: str, system: str = "") -> str:
+        from google import genai
+        from google.genai import types
         full_prompt = f"{system}\n\n{prompt}" if system else prompt
-        response = self.model.generate_content(full_prompt)
+        response = self.client.models.generate_content(
+            model=self.model,
+            contents=full_prompt,
+            config=types.GenerateContentConfig(
+                max_output_tokens=8192,
+            ),
+        )
         return response.text
-
+        
 def get_provider():
     provider = os.environ.get("AI_PROVIDER", "claude").lower()
     if provider == "claude":

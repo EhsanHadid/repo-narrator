@@ -1,0 +1,25 @@
+name: Repo Narrator
+
+on:
+  pull_request:
+    types: [closed]
+  workflow_dispatch:
+
+jobs:
+  narrate:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: EhsanHadid/repo-narrator@v1
+        with:
+          ai_provider: gemini
+          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          structure_file: structure.md
+          embed_structure_in_readme: "true"
+          extra_md_files: "CHANGELOG.md"

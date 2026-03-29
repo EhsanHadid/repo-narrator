@@ -1,0 +1,109 @@
+name: "Repo Narrator"
+description: "AI-powered docs updater: annotates file structure, updates README and markdown files after every merged PR"
+author: "your-username"
+
+branding:
+  icon: "book-open"
+  color: "purple"
+
+inputs:
+  ai_provider:
+    description: "AI provider to use: claude | openai | gemini"
+    required: true
+    default: "claude"
+
+  anthropic_api_key:
+    description: "Anthropic API key (required if ai_provider is claude)"
+    required: false
+
+  openai_api_key:
+    description: "OpenAI API key (required if ai_provider is openai)"
+    required: false
+
+  gemini_api_key:
+    description: "Google Gemini API key (required if ai_provider is gemini)"
+    required: false
+
+  model:
+    description: "Override the default model for the chosen provider"
+    required: false
+    default: ""
+
+  update_readme:
+    description: "Update README.md based on PR changes"
+    required: false
+    default: "true"
+
+  structure_file:
+    description: "Filename for annotated structure output. Set to 'none' to skip creating it"
+    required: false
+    default: "structure.md"
+
+  embed_structure_in_readme:
+    description: "Embed the file tree inside README.md (inside a collapsible section)"
+    required: false
+    default: "false"
+
+  ignored_paths:
+    description: "Comma-separated paths to exclude from the tree"
+    required: false
+    default: "node_modules,.git,dist,build,.next,__pycache__,.nx,coverage"
+
+  extra_md_files:
+    description: "Comma-separated additional markdown files to update (e.g. CONTRIBUTING.md,CHANGELOG.md)"
+    required: false
+    default: "CHANGELOG.md"
+
+  commit_message:
+    description: "Git commit message for the doc update"
+    required: false
+    default: "docs: repo-narrator update"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Install dependencies
+      shell: bash
+      run: pip install -r ${{ github.action_path }}/requirements.txt
+
+    - name: Run Repo Narrator
+      shell: bash
+      env:
+        AI_PROVIDER:             ${{ inputs.ai_provider }}
+        ANTHROPIC_API_KEY:       ${{ inputs.anthropic_api_key }}
+        OPENAI_API_KEY:          ${{ inputs.openai_api_key }}
+        GEMINI_API_KEY:          ${{ inputs.gemini_api_key }}
+        OVERRIDE_MODEL:          ${{ inputs.model }}
+        UPDATE_README:           ${{ inputs.update_readme }}
+        STRUCTURE_FILE:          ${{ inputs.structure_file }}
+        EMBED_STRUCTURE_README:  ${{ inputs.embed_structure_in_readme }}
+        IGNORED_PATHS:           ${{ inputs.ignored_paths }}
+        EXTRA_MD_FILES:          ${{ inputs.extra_md_files }}
+        PR_TITLE:                ${{ github.event.pull_request.title }}
+        PR_BODY:                 ${{ github.event.pull_request.body }}
+        PR_NUMBER:               ${{ github.event.pull_request.number }}
+        PR_AUTHOR:               ${{ github.event.pull_request.user.login }}
+      run: python ${{ github.action_path }}/src/main.py
+
+    - name: Commit updated docs
+      shell: bash
+      run: |
+        git config user.name "repo-narrator[bot]"
+        git config user.email "repo-narrator[bot]@users.noreply.github.com"
+        git add "*.md"
+        git diff --cached --quiet || git commit -m "${{ inputs.commit_message }} (#${{ github.event.pull_request.number }})"
+        git push
+```
+
+---
+
+## `requirements.txt`
+```
+anthropic>=0.25.0
+openai>=1.30.0
+google-generativeai>=0.7.0

@@ -4,6 +4,11 @@ on:
   pull_request:
     types: [closed]
   workflow_dispatch:
+    inputs:
+      model:
+        description: "AI model to use (leave empty for provider default)"
+        required: false
+        default: ""
 
 jobs:
   narrate:
@@ -20,6 +25,7 @@ jobs:
         with:
           ai_provider: gemini
           gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          model: ${{ github.event.inputs.model || 'gemini-1.5-flash' }}
           structure_file: structure.md
           embed_structure_in_readme: "true"
           extra_md_files: "CHANGELOG.md"
